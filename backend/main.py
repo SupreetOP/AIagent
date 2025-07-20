@@ -12,57 +12,37 @@ from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from atlassian import Confluence
 from bs4 import BeautifulSoup
-import requests
 
 # ----------------------------
 # Load Environment + Models
 # ----------------------------
 load_dotenv()
 
+# Embedding Model (lightweight)
 HF_MODEL_EMBED = "sentence-transformers/all-MiniLM-L6-v2"
 embedding_model = SentenceTransformer(HF_MODEL_EMBED)
 
-GEN_MODEL = "google/flan-t5-large"
-text_generator = pipeline("text2text-generation", model=GEN_MODEL)
-
-# Gemini API Setup
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-pro"  # default model
-
-def call_gemini(prompt):
-    if not GEMINI_API_KEY:
-        return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    try:
-        resp = requests.post(url, json=payload, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        print(f"Gemini API error: {e}")
-        return None
+# Use small text generation model (light enough for Railway)
+GEN_MODEL = "google/flan-t5-small"
+text_generator = None  # Lazy load on first use
 
 # Notion Setup
 NOTION_TOKEN = os.getenv("NOTION_API_KEY")
 notion = Client(auth=NOTION_TOKEN)
 
-# Google Docs Setup (Render Safe)
+# Google Docs Setup (Render/Railway Safe)
 GOOGLE_SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
 GOOGLE_JSON_CONTENT = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-
+docs_service = None
 if GOOGLE_JSON_CONTENT:
     creds_info = json.loads(GOOGLE_JSON_CONTENT)
     creds = service_account.Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SCOPES)
     docs_service = build('docs', 'v1', credentials=creds)
-else:
-    docs_service = None
 
 # Confluence Setup
 CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL", "")
 CONFLUENCE_EMAIL = os.getenv("CONFLUENCE_EMAIL", "")
 CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN", "")
-
 confluence = None
 if CONFLUENCE_BASE_URL and CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN:
     confluence = Confluence(
@@ -106,11 +86,17 @@ app = FastAPI(title="Internal Docs AI Agent")
 
 class Question(BaseModel):
     query: str
-    model: str = "gemini"  # or "flan"
 
 # ----------------------------
 # Utility Functions
 # ----------------------------
+def get_text_generator():
+    global text_generator
+    if text_generator is None:
+        print("Loading text generation model (flan-t5-small)...")
+        text_generator = pipeline("text2text-generation", model=GEN_MODEL)
+    return text_generator
+
 def search_docs(query, top_k=2):
     if not documents or index.ntotal == 0:
         return []
@@ -119,12 +105,12 @@ def search_docs(query, top_k=2):
     valid_indices = [i for i in I[0] if i < len(documents)]
     return [documents[i] for i in valid_indices]
 
-def generate_agent_answer(query, docs, model="gemini"):
+def generate_agent_answer(query, docs):
     if not docs:
         return "I couldn’t find any relevant information in the company docs yet. Upload some files first."
-
     context = "\n".join([f"{title}: {content}" for title, content in docs])
     prompt = f"""
+You are a helpful, friendly AI assistant.
 Use the following context to answer the question.
 If the answer isn't in the context, say you don't know politely.
 
@@ -132,14 +118,10 @@ Context:
 {context}
 
 Question: {query}
-Answer in a refined, conversational tone:
+Answer conversationally:
 """
-    if model == "gemini" and GEMINI_API_KEY:
-        gemini_resp = call_gemini(prompt)
-        if gemini_resp:
-            return gemini_resp
-    # Fallback to Flan-T5
-    result = text_generator(prompt, max_length=300, do_sample=False)[0]['generated_text']
+    generator = get_text_generator()
+    result = generator(prompt, max_length=200, do_sample=False)[0]['generated_text']
     return result.strip()
 
 def fetch_notion_page_text(page_id: str):
@@ -190,50 +172,21 @@ def ask_question(question: Question):
         "hi": "Hey there! 👋 How can I help you?",
         "hello": "Hello! 😊 What’s on your mind today?",
         "how are you": "I’m doing great! Got any questions for me?",
-        "who are you": "I’m UR BRO 😎 — your AI assistant! I can read PDFs, DOCX, Notion, Google Docs, and Confluence for you.",
+        "who are you": "I’m UR BRO 😎 — your AI assistant! I can read PDFs, DOCX, Notion, Google Docs, and Confluence pages for you.",
         "tell me a joke": "Sure! Why did the computer get cold? Because it forgot to close its Windows. 😄"
     }
+
     for key, response in casual_responses.items():
         if key in query:
             return {"answer": response}
 
     docs = search_docs(question.query)
     if not docs:
-        return {"answer": "I couldn’t find anything about that. 🤔 Upload files or fetch from Notion, Google Docs, or Confluence."}
+        return {"answer": "I couldn’t find anything about that in the docs. 🤔 Upload files, or use Notion/Google Docs/Confluence."}
 
-    answer = generate_agent_answer(question.query, docs, model=question.model)
+    answer = generate_agent_answer(question.query, docs)
     sources = [title for title, _ in docs]
     return {"answer": f"{answer}\n\n(Sourced from: {', '.join(sources)})", "sources": sources}
-
-@app.post("/fetch-notion-doc")
-async def fetch_notion_doc(page_id: str = Form(...), title: str = Form("Notion Document")):
-    global documents, index
-    try:
-        content = fetch_notion_page_text(page_id)
-    except Exception as e:
-        return {"error": f"Failed to fetch Notion page: {str(e)}"}
-    if not content.strip():
-        return {"error": "Page is empty or cannot be read."}
-    emb = embedding_model.encode([content])[0]
-    index.add(np.array([emb], dtype="float32"))
-    documents.append((title, content))
-    save_index()
-    return {"message": f"Notion page '{title}' indexed successfully.", "total_docs": len(documents)}
-
-@app.post("/fetch-google-doc")
-async def fetch_google_doc(document_id: str = Form(...), title: str = Form("Google Document")):
-    global documents, index
-    try:
-        content = fetch_google_doc_text(document_id)
-    except Exception as e:
-        return {"error": f"Failed to fetch Google Doc: {str(e)}"}
-    if not content.strip():
-        return {"error": "Google Doc is empty or cannot be read."}
-    emb = embedding_model.encode([content])[0]
-    index.add(np.array([emb], dtype="float32"))
-    documents.append((title, content))
-    save_index()
-    return {"message": f"Google Doc '{title}' indexed successfully.", "total_docs": len(documents)}
 
 @app.post("/fetch-confluence-page")
 async def fetch_confluence_page(page_id: str = Form(...), title: str = Form("Confluence Page")):
@@ -248,7 +201,22 @@ async def fetch_confluence_page(page_id: str = Form(...), title: str = Form("Con
     index.add(np.array([emb], dtype="float32"))
     documents.append((title, content))
     save_index()
-    return {"message": f"Confluence page '{title}' indexed successfully.", "total_docs": len(documents)}
+    return {"message": f"Confluence page '{title}' added and indexed successfully.", "total_docs": len(documents)}
+
+@app.post("/fetch-google-doc")
+async def fetch_google_doc(document_id: str = Form(...), title: str = Form("Google Document")):
+    global documents, index
+    try:
+        content = fetch_google_doc_text(document_id)
+    except Exception as e:
+        return {"error": f"Failed to fetch Google Doc: {str(e)}"}
+    if not content.strip():
+        return {"error": "Google Doc is empty or cannot be read."}
+    emb = embedding_model.encode([content])[0]
+    index.add(np.array([emb], dtype="float32"))
+    documents.append((title, content))
+    save_index()
+    return {"message": f"Google Doc '{title}' added and indexed successfully.", "total_docs": len(documents)}
 
 @app.get("/list-docs")
 def list_docs():
