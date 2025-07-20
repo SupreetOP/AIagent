@@ -1,39 +1,15 @@
-# ----------------------------
-# Core Web Framework & Server
-# ----------------------------
-fastapi==0.111.0
-uvicorn==0.30.0
-
-# ----------------------------
-# AI / ML (FAISS + Transformers with safe versions)
-# ----------------------------
-faiss-cpu==1.7.4
-numpy==1.26.4
-sentence-transformers==2.2.2
-transformers==4.39.3        # Safe version (no Rust build issues)
-tokenizers==0.13.3           # Matches Transformers 4.39.x (prebuilt wheel)
-pydantic==1.10.9
-
-# ----------------------------
-# Document & Data Handling
-# ----------------------------
-PyPDF2==3.0.1
-python-docx==0.8.11
-python-dotenv==1.0.0
-python-multipart>=0.0.7
-
-# ----------------------------
-# API & Integrations
-# ----------------------------
-requests==2.31.0
-beautifulsoup4==4.12.2
-google-api-python-client==2.94.0
-google-auth==2.22.0
-google-auth-oauthlib==1.0.0
-notion-client==2.0.0
-atlassian-python-api==3.41.9
-
-# ----------------------------
-# Optional Optimization (for performance)
-# ----------------------------
-orjson==3.10.3
+fastapi
+uvicorn
+python-dotenv
+faiss-cpu
+sentence-transformers
+transformers
+torch
+PyPDF2
+python-docx
+notion-client
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+numpy
