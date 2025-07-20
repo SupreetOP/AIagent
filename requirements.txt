@@ -1,25 +1,38 @@
-# Web framework & server
-fastapi>=0.111.0
-uvicorn[standard]>=0.30.0
+# ----------------------------
+# Core Web Framework & Server
+# ----------------------------
+fastapi==0.111.0
+uvicorn==0.30.0   # Avoid [standard] to reduce size (no websockets/extra)
 
-# AI / ML
-faiss-cpu>=1.7.4
-numpy>=1.23.0,<2.0
-sentence-transformers>=2.2.2
-transformers>=4.40.0
-pydantic>=1.10.9
+# ----------------------------
+# AI / ML (lightweight versions)
+# ----------------------------
+faiss-cpu==1.7.4
+numpy==1.26.4        # Latest stable but not NumPy 2.0 (saves memory)
+sentence-transformers==2.2.2
+transformers==4.40.0
+pydantic==1.10.9
 
-# Document & data handling
-PyPDF2>=3.0.1
-python-docx>=0.8.11
-python-dotenv>=1.0.0
-python-multipart>=0.0.6
+# ----------------------------
+# Document & Data Handling
+# ----------------------------
+PyPDF2==3.0.1
+python-docx==0.8.11
+python-dotenv==1.0.0
+python-multipart==0.0.6
 
-# API & Web scraping
-requests>=2.31.0
-beautifulsoup4>=4.12.2
-google-api-python-client>=2.94.0
-google-auth>=2.22.0
-google-auth-oauthlib>=1.0.0
-notion-client>=2.0.0
-atlassian-python-api>=3.41.9
+# ----------------------------
+# API & Integrations
+# ----------------------------
+requests==2.31.0
+beautifulsoup4==4.12.2
+google-api-python-client==2.94.0
+google-auth==2.22.0
+google-auth-oauthlib==1.0.0
+notion-client==2.0.0
+atlassian-python-api==3.41.9
+
+# ----------------------------
+# Optional Optimization (for performance)
+# ----------------------------
+orjson==3.10.3       # Faster JSON (FastAPI auto-uses if available)

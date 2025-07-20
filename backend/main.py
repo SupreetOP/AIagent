@@ -4,33 +4,32 @@ import faiss, pickle, numpy as np
 from docx import Document
 import os, json
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
-from transformers import pipeline
 from PyPDF2 import PdfReader
 from notion_client import Client
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from atlassian import Confluence
+import uvicorn
 
 # ----------------------------
-# Load Environment + Models
+# Environment Setup
 # ----------------------------
 load_dotenv()
 
-HF_MODEL_EMBED = "sentence-transformers/all-MiniLM-L6-v2"
-embedding_model = SentenceTransformer(HF_MODEL_EMBED)
+# Models will be loaded lazily to save memory
+embedding_model = None
+text_generator = None
 
+HF_MODEL_EMBED = "sentence-transformers/all-MiniLM-L6-v2"
 GEN_MODEL = "google/flan-t5-large"
-text_generator = pipeline("text2text-generation", model=GEN_MODEL)
 
 # Notion Setup
 NOTION_TOKEN = os.getenv("NOTION_API_KEY")
-notion = Client(auth=NOTION_TOKEN)
+notion = Client(auth=NOTION_TOKEN) if NOTION_TOKEN else None
 
 # Google Docs Setup (Render Safe)
 GOOGLE_SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
 GOOGLE_JSON_CONTENT = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-
 if GOOGLE_JSON_CONTENT:
     creds_info = json.loads(GOOGLE_JSON_CONTENT)
     creds = service_account.Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SCOPES)
@@ -42,7 +41,6 @@ else:
 CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL", "")
 CONFLUENCE_EMAIL = os.getenv("CONFLUENCE_EMAIL", "")
 CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN", "")
-
 confluence = None
 if CONFLUENCE_BASE_URL and CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN:
     confluence = Confluence(
@@ -88,12 +86,29 @@ class Question(BaseModel):
     query: str
 
 # ----------------------------
+# Lazy Loading
+# ----------------------------
+def get_embedding_model():
+    global embedding_model
+    if embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        embedding_model = SentenceTransformer(HF_MODEL_EMBED)
+    return embedding_model
+
+def get_text_generator():
+    global text_generator
+    if text_generator is None:
+        from transformers import pipeline
+        text_generator = pipeline("text2text-generation", model=GEN_MODEL)
+    return text_generator
+
+# ----------------------------
 # Utility Functions
 # ----------------------------
 def search_docs(query, top_k=2):
     if not documents or index.ntotal == 0:
         return []
-    query_emb = embedding_model.encode([query])[0]
+    query_emb = get_embedding_model().encode([query])[0]
     D, I = index.search(np.array([query_emb], dtype="float32"), top_k)
     valid_indices = [i for i in I[0] if i < len(documents)]
     return [documents[i] for i in valid_indices]
@@ -103,20 +118,23 @@ def generate_agent_answer(query, docs):
         return "I couldn’t find any relevant information in the company docs yet. Upload some files first."
     context = "\n".join([f"{title}: {content}" for title, content in docs])
     prompt = f"""
-You are a helpful, friendly AI assistant.
+You are a helpful AI assistant.
 Use the following context to answer the question.
-If the answer isn't in the context, say you don't know politely.
+If the answer isn't in the context, say you don't know.
 
 Context:
 {context}
 
 Question: {query}
-Answer conversationally:
+Answer:
 """
-    result = text_generator(prompt, max_length=250, do_sample=False)[0]['generated_text']
+    generator = get_text_generator()
+    result = generator(prompt, max_length=250, do_sample=False)[0]['generated_text']
     return result.strip()
 
 def fetch_notion_page_text(page_id: str):
+    if not notion:
+        return ""
     blocks = notion.blocks.children.list(page_id)["results"]
     content = []
     for block in blocks:
@@ -148,11 +166,9 @@ def fetch_confluence_page_text(page_id: str):
     try:
         page = confluence.get_page_by_id(page_id, expand="body.storage")
         html_content = page["body"]["storage"]["value"]
-        # Confluence returns HTML, so strip tags (quick method)
         from bs4 import BeautifulSoup
         return BeautifulSoup(html_content, "html.parser").get_text(separator="\n")
-    except Exception as e:
-        print(f"Failed to fetch Confluence page: {e}")
+    except Exception:
         return ""
 
 # ----------------------------
@@ -161,77 +177,31 @@ def fetch_confluence_page_text(page_id: str):
 @app.post("/ask-question")
 def ask_question(question: Question):
     query = question.query.strip().lower()
-
     casual_responses = {
-        "hi": "Hey there! 👋 How can I help you?",
-        "hello": "Hello! 😊 What’s on your mind today?",
-        "how are you": "I’m doing great! Got any questions for me?",
-        "who are you": "I’m UR BRO 😎 — your AI assistant! I can read PDFs, DOCX, Notion, Google Docs, and Confluence pages for you.",
-        "tell me a joke": "Sure! Why did the computer get cold? Because it forgot to close its Windows. 😄"
+        "hi": "Hey there! 👋",
+        "hello": "Hello! 😊",
+        "how are you": "I’m good! Got questions?",
+        "who are you": "I’m UR BRO 😎, your AI docs assistant!",
     }
-
     for key, response in casual_responses.items():
         if key in query:
             return {"answer": response}
 
     docs = search_docs(question.query)
-
     if not docs:
-        return {"answer": "I couldn’t find anything about that in the docs. 🤔 Upload some files, or use Notion/Google Docs/Confluence."}
-
+        return {"answer": "I couldn’t find anything about that in the docs. Upload some files or connect Notion/Google Docs/Confluence."}
     answer = generate_agent_answer(question.query, docs)
     sources = [title for title, _ in docs]
-
-    return {"answer": f"{answer}\n\n(Sourced from: {', '.join(sources)})", "sources": sources}
-
-@app.post("/fetch-confluence-page")
-async def fetch_confluence_page(page_id: str = Form(...), title: str = Form("Confluence Page")):
-    global documents, index
-    try:
-        content = fetch_confluence_page_text(page_id)
-    except Exception as e:
-        return {"error": f"Failed to fetch Confluence page: {str(e)}"}
-    if not content.strip():
-        return {"error": "Confluence page is empty or cannot be read."}
-    emb = embedding_model.encode([content])[0]
-    index.add(np.array([emb], dtype="float32"))
-    documents.append((title, content))
-    save_index()
-    return {"message": f"Confluence page '{title}' added and indexed successfully.", "total_docs": len(documents)}
-
-@app.post("/fetch-google-doc")
-async def fetch_google_doc(document_id: str = Form(...), title: str = Form("Google Document")):
-    global documents, index
-    try:
-        content = fetch_google_doc_text(document_id)
-    except Exception as e:
-        return {"error": f"Failed to fetch Google Doc: {str(e)}"}
-    if not content.strip():
-        return {"error": "Google Doc is empty or cannot be read."}
-    emb = embedding_model.encode([content])[0]
-    index.add(np.array([emb], dtype="float32"))
-    documents.append((title, content))
-    save_index()
-    return {"message": f"Google Doc '{title}' added and indexed successfully.", "total_docs": len(documents)}
+    return {"answer": f"{answer}\n\n(Sources: {', '.join(sources)})", "sources": sources}
 
 @app.get("/list-docs")
 def list_docs():
-    if not documents:
-        return {"documents": [], "message": "No documents indexed yet."}
     titles = [title for title, _ in documents]
     return {"total": len(titles), "documents": titles}
 
-@app.delete("/delete-doc")
-def delete_doc(title: str):
-    global documents, index
-    to_delete = [i for i, (t, _) in enumerate(documents) if t.lower() == title.lower()]
-    if not to_delete:
-        return {"error": f"No document found with title '{title}'."}
-    for i in sorted(to_delete, reverse=True):
-        documents.pop(i)
-    index = faiss.IndexFlatL2(embedding_dim)
-    if documents:
-        embeddings = [embedding_model.encode([content])[0] for _, content in documents]
-        index.add(np.array(embeddings, dtype="float32"))
-    save_index()
-    return {"message": f"Deleted '{title}'.", "remaining_docs": len(documents)}
+# ----------------------------
+# Run Server (Render)
+# ----------------------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))  # Render sets PORT dynamically
+    uvicorn.run("main:app", host="0.0.0.0", port=port, workers=1)

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: internal-docs-ai-agent
+    env: python
+    plan: free  # (512MB memory, upgrade to starter if it still OOMs)
+    buildCommand: pip install -r requirements.txt
+    startCommand: python backend/main.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10
