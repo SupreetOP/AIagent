@@ -1,0 +1,35 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ---- Virtual Environment ----
+.venv/
+env/
+venv/
+
+# ---- Logs & Temp Files ----
+*.log
+*.pot
+*.pyc
+*.pid
+*.seed
+*.out
+*.bak
+
+# ---- OS-Specific Files ----
+.DS_Store
+Thumbs.db
+
+# ---- IDE Settings ----
+.vscode/
+.idea/
+
+# ---- Build Artifacts ----
+dist/
+build/
+*.egg-info/
+
+# ---- FAISS Index & Cache (optional, regenerate on deploy) ----
+embeddings_store/
